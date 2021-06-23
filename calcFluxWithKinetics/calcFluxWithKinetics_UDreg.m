@@ -1,4 +1,4 @@
-function flux = calcFluxWithKinetics_UDReg(concMatrix,timeVec,knownKinetics)
+function flux = calcFluxWithKinetics_UDreg(concMatrix,timeVec,knownKinetics)
 % Calculate flux reaction rates in underdetermined system with regulation
 % using known kinetic equations.
 
