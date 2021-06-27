@@ -144,7 +144,7 @@ function penalty = calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux
 
         % Calculate BST fit penalty
         nT = size(absolute_concMatrix,1)-1;
-        BST_penalty = pen_BSTfit_hynne;
+        BST_penalty = pen_BSTfit_hynne(nT,absolute_concMatrix,Vcalc);
         
         % Calculate total penalty
         penalty = abs(massbalance_penalty)/1000 + abs(conc_penalty) + abs(oneContMetCorr_penalty) + abs(twoContMetCorr_penalty) + abs(oneContMetCurveFit_penalty) + abs(BST_penalty);
