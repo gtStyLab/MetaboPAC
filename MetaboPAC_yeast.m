@@ -1,10 +1,11 @@
-function [absolute_concMatrix predicted_responseFactors] = MetaboPAC_yeast(rep,percKnownKinetics)
+function [absolute_concMatrix predicted_responseFactors] = MetaboPAC_yeast(approach_option,rep,perc_additional_kinetics,rand_idx)
 
 % Set up initial information about system
 modelInfo_hynne
 load('hynne_k-01_hiRes.mat');
 
-modelInfo.fixedFluxes = (modelInfo.vBounds(:,1)==modelInfo.vBounds(:,2));
+modelInfo.fixedFluxes = (modelInfo.vBounds(:,1)== modelInfo.vBounds(:,2));
+stoichMatrix = full(modelInfo.S);
 
 numMetabs = size(modelInfo.S,1);
 numFlux = size(modelInfo.S,2);
@@ -25,18 +26,53 @@ trueRF = trueRF(rep,:);
 % Calculate relative abundances
 relative_concMatrix = concMatrix.*trueRF;
 
-% Perform kinetic equations approach
-numKnownKinetics = round(percKnownKinetics/100*numFlux);
-knownKinetics = sort(randperm(numFlux,numKnownKinetics));
-for i = 1:48
-    [KEapproach_results(i,:) knownMet] = solveRF_KEapproach_hynne(relative_concMatrix,timeVec,knownKinetics);
+% Perform kinetic equations approach or skip based on chosen approach
+
+switch approach_option
+    case 1
+        % KE + opt
+        approach_string = 'KE_';
+        knownKinetics_fixed = [19,21,22,23];
+        remKinetics = setdiff(1:numFlux,knownKinetics_fixed);
+        numKnownKinetics = round(perc_additional_kinetics/100*length(remKinetics));
+        rng(rand_idx)
+        knownKinetics_temp = remKinetics(randperm(length(remKinetics),numKnownKinetics));
+        knownKinetics = [knownKinetics_fixed,knownKinetics_temp];
+        for i = 1:48
+            [KEapproach_results(i,:) knownMet] = solveRF_KEapproach_hynne(relative_concMatrix,timeVec,knownKinetics,stoichMatrix);
+        end
+        if knownMet ~= 0
+            RF_kinetics = median(KEapproach_results);
+        else
+            RF_kinetics = [];
+            knownMet = [];
+        end
+    case 2
+        % opt only
+        approach_string = '';
+        RF_kinetics = [];
+        knownMet = [];
+    case 3
+        % KE + opt, without accurate flux estimation assumption
+        approach_string = 'KE_noDFE_';
+        knownKinetics_fixed = [];
+        remKinetics = setdiff(1:numFlux,knownKinetics_fixed);
+        numKnownKinetics = round(perc_additional_kinetics/100*length(remKinetics));
+        rng(rand_idx)
+        knownKinetics_temp = remKinetics(randperm(length(remKinetics),numKnownKinetics));
+        knownKinetics = [knownKinetics_fixed,knownKinetics_temp];
+        for i = 1:48
+            [KEapproach_results(i,:) knownMet] = solveRF_KEapproach_hynne(relative_concMatrix,timeVec,knownKinetics,stoichMatrix);
+        end
+        if knownMet ~= 0
+            RF_kinetics = median(KEapproach_results);
+        else
+            RF_kinetics = [];
+            knownMet = [];
+        end
 end
-if knownMet ~= 0
-    RF_kinetics = median(KEapproach_results);
-else
-    RF_kinetics = [];
-    knownMet = [];
-end
+
+
 
 % Set up information for optimization approach
 maxRandVal = 1000;
@@ -56,13 +92,14 @@ end
 fval = 1500*ones(48,1);
 RF_opt = ones(48,numMetabs);
 if length(knownMet) ~= numMetabs
-    for i = 1:48
+    for i = 1:1:48
+        rng(i)
         % Set initial seed for optimizier
         x0 = (maxRandVal-minRandVal).*rand(1,numMetabs-length(knownMet)) + minRandVal;
-        ga_options = optimoptions('ga','MaxTime',30,'InitialPopulationMatrix',x0);
-
+%         ga_options = optimoptions('ga','MaxTime',30,'InitialPopulationMatrix',x0);
+        ga_options = optimoptions('ga','MaxGenerations',100,'InitialPopulationMatrix',x0,'Display','iter');
         % Perform genetic algorithm optimization
-        [optimalRF fval(i,1)] = ga(@(testRF) calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux,MA_reactions,relative_concMatrix,timeVec,fluxTimeVec,RF_kinetics,knownMet,knownKinetics),numMetabs-length(knownMet),[],[],[],[],lb,ub,[],ga_options);
+        [optimalRF fval(i,1)] = ga(@(testRF) calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux,MA_reactions,relative_concMatrix,timeVec,fluxTimeVec,RF_kinetics,knownMet,knownKinetics,rep),numMetabs-length(knownMet),[],[],[],[],lb,ub,[],ga_options);
 
         RF_temp = zeros(1,numMetabs);
         RF_temp(1,knownMet) = RF_kinetics;
@@ -79,12 +116,12 @@ end
 predicted_responseFactors = median(RF_opt);
 absolute_concMatrix = relative_concMatrix./predicted_responseFactors;
 
-save(sprintf('yeast_MetaboPAC_percKnownKinetics-%03d_rep-%03d.mat',percKnownKinetics,rep));
+save(sprintf('results/yeast_MetaboPAC_%sk-01_addKinetics-%03d_rep-%03d_rand-%03d.mat',approach_string,perc_additional_kinetics,rep,rand_idx));
 end
 
 
 
-function penalty = calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux,MA_reactions,relative_concMatrix,timeVec,fluxTimeVec,RF_kinetics,knownMet,knownKinetics)
+function penalty = calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux,MA_reactions,relative_concMatrix,timeVec,fluxTimeVec,RF_kinetics,knownMet,knownKinetics,rep)
     % Consolidate response factor values
     RF = zeros(1,numMetabs);
     RF(1,knownMet) = RF_kinetics;
@@ -98,11 +135,9 @@ function penalty = calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux
     absolute_concMatrix(:,1:numMetabs) = relative_concMatrix(:,1:numMetabs)./RF;
     
     % Set up flux matrix before inferring fluxes
-    fluxMatrixTemp = nan(size(test_Vpool,1),numFlux+numMetabs);
-    fluxMatrixTemp(:,numFlux+1:end) = test_Vpool;
-    fluxMatrixTemp(:,modelInfo.fixedFluxes) = ones(size(fluxMatrixTemp(:,modelInfo.fixedFluxes),1),1)*modelInfo.vBounds(modelInfo.fixedFluxes,1)';
     newFluxMatrixTemp = calcFluxWithKinetics_hynne(absolute_concMatrix,timeVec,knownKinetics);
     modelInfo.fixedFluxes = ~isnan(newFluxMatrixTemp(1,1:numFlux))';
+    newFluxMatrixTemp(:,numFlux+1:end) = test_Vpool;
     
     % Infer fluxes using pinv
     Vcalc = calcFluxesViaPinv(newFluxMatrixTemp,modelInfo.S,modelInfo.fixedFluxes);    
@@ -126,26 +161,23 @@ function penalty = calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux
             conc_penalty = 0;
         end
         
-
         % Calculate correlation penalty for reactions controlled by one
         % metabolite
         oneContMetCorr_penalty = pen_oneContMetCorr_hynne(absolute_concMatrix,Vcalc,timeVec,fluxTimeVec);
-        
-        % Calculate correlation penalty for reactions controlled by two
-        % metabolites
-        twoContMetCorr_penalty = pen_twoContMetCorr_hynne(absolute_concMatrix,Vcalc,timeVec,fluxTimeVec);
 
         % Calculate curve fit penalty for reactions controlled by one
         % metabolite
         oneContMetCurveFit_penalty = pen_oneContMetCurveFit_hynne(absolute_concMatrix,Vcalc,timeVec,fluxTimeVec);
 
+        %Calculate steady state penalty
+        ss_penalty = pen_devSSdist_yeast(Vcalc(:,1:numFlux));
+        
         % Calculate BST fit penalty
         nT = size(absolute_concMatrix,1)-1;
-        BST_penalty = pen_BSTfit_hynne(nT,absolute_concMatrix,Vcalc);
+        BST_penalty = pen_BSTfit_hynne_updated(absolute_concMatrix,Vcalc);
         
         % Calculate total penalty
-        penalty = abs(massbalance_penalty)/1000 + abs(conc_penalty) + abs(oneContMetCorr_penalty) + abs(twoContMetCorr_penalty) + abs(oneContMetCurveFit_penalty) + abs(BST_penalty);
-        
+        penalty = 1000 * abs(massbalance_penalty) + 10 * abs(conc_penalty) + abs(oneContMetCorr_penalty) + 10 * abs(oneContMetCurveFit_penalty) + 10 * abs(BST_penalty) + 0.1 * ss_penalty;
         if isnan(penalty)
             penalty = 1e7;
         end
