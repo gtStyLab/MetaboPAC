@@ -1,14 +1,16 @@
-function [absolute_concMatrix predicted_responseFactors] = MetaboPAC_UDreg_noisy(nt,cov,RF_rep,noise_rep,rand_idx,percKnownKinetics)
+function [absolute_concMatrix predicted_responseFactors] = MetaboPAC_UDreg_noisy(nt,cov,rep,percKnownKinetics)
 
 % Set up initial information about system
 modelInfo_UDreg
-load(sprintf('UDReg_k-01_nT-%03d_cov-%02d_rep-%03d.mat',nt,cov,noise_rep));
+load(sprintf('UDregReg_k-01_nT-%03d_cov-%02d_rep-%03d.mat',nt,cov,rep));
 
 modelInfo.fixedFluxes = (modelInfo.vBounds(:,1)==modelInfo.vBounds(:,2));
-stoichMatrix = full(modelInfo.S);
 
 numMetabs = size(modelInfo.S,1);
 numFlux = size(modelInfo.S,2);
+
+% Smooth data
+concMatrix = smoothdata(concMatrix,'gaussian',timeVec(end)/4,'SamplePoints',timeVec);
 
 numExtraMets = numMetabs - size(concMatrix,2);
 if numExtraMets > 0
@@ -21,25 +23,14 @@ MA_reactions = [row_MA col_MA];
 
 % Load relative abundances
 load('UDreg_trueRF');
-trueRF = trueRF(RF_rep,:);
+trueRF = trueRF(rep,:);
 
 % Calculate relative abundances
 relative_concMatrix = concMatrix.*trueRF;
-relative_fluxMatrix = zeros(size(relative_concMatrix));%give a null fluxMatrix for smoothing functions 
-
-% Smooth data
-relative_data = struct('timeVec',timeVec,'concMatrix',relative_concMatrix,'fluxMatrix',relative_fluxMatrix);
-nTFit = 50;
-fluxScheme = 2;
-[timeVec, relative_concMatrix, ~] = processToFittingData(relative_data,nTFit,fluxScheme);
 
 % Perform kinetic equations approach
-knownKinetics_fixed = [4,5,7,8];
-remKinetics = setdiff(1:numFlux,knownKinetics_fixed);
-numKnownKinetics = round(percKnownKinetics/100*length(remKinetics));
-rng(rand_idx)
-knownKinetics_temp = remKinetics(randperm(length(remKinetics),numKnownKinetics));
-knownKinetics = [knownKinetics_fixed,knownKinetics_temp];
+numKnownKinetics = round(percKnownKinetics/100*numFlux);
+knownKinetics = sort(randperm(numFlux,numKnownKinetics));
 for i = 1:48
     [KEapproach_results(i,:) knownMet] = solveRF_KEapproach_UDreg(relative_concMatrix,timeVec,knownKinetics);
 end
@@ -70,9 +61,8 @@ RF_opt = ones(48,numMetabs);
 if length(knownMet) ~= numMetabs
     for i = 1:48
         % Set initial seed for optimizier
-        rng(i)
         x0 = (maxRandVal-minRandVal).*rand(1,numMetabs-length(knownMet)) + minRandVal;
-        ga_options = optimoptions('ga','MaxGenerations',100,'InitialPopulationMatrix',x0);
+        ga_options = optimoptions('ga','MaxTime',30,'InitialPopulationMatrix',x0);
 
         % Perform genetic algorithm optimization
         [optimalRF fval(i,1)] = ga(@(testRF) calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux,MA_reactions,relative_concMatrix,timeVec,fluxTimeVec,RF_kinetics,knownMet,knownKinetics),numMetabs-length(knownMet),[],[],[],[],lb,ub,[],ga_options);
@@ -92,7 +82,7 @@ end
 predicted_responseFactors = median(RF_opt);
 absolute_concMatrix = relative_concMatrix./predicted_responseFactors;
 
-save(sprintf('results/UDreg_MetaboPAC_nT-%03d_cov-%02d_addKinetics-%03d_RFrep-%03d_noiserep-%03d_rand-%03d.mat',nt,cov,percKnownKinetics,RF_rep,noise_rep,rand_idx));
+save(sprintf('UDreg_MetaboPAC_nT-%03d_cov-%02d_percKnownKinetics-%03d_rep-%03d.mat',nt,cov,percKnownKinetics,rep));
 end
 
 
@@ -111,9 +101,11 @@ function penalty = calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux
     absolute_concMatrix(:,1:numMetabs) = relative_concMatrix(:,1:numMetabs)./RF;
     
     % Set up flux matrix before inferring fluxes
-    newFluxMatrixTemp = calcFluxWithKinetics_UDReg(absolute_concMatrix,timeVec,knownKinetics);
+    fluxMatrixTemp = nan(size(test_Vpool,1),numFlux+numMetabs);
+    fluxMatrixTemp(:,numFlux+1:end) = test_Vpool;
+    fluxMatrixTemp(:,modelInfo.fixedFluxes) = ones(size(fluxMatrixTemp(:,modelInfo.fixedFluxes),1),1)*modelInfo.vBounds(modelInfo.fixedFluxes,1)';
+    newFluxMatrixTemp = calcFluxWithKinetics_UDreg(absolute_concMatrix,timeVec,knownKinetics);
     modelInfo.fixedFluxes = ~isnan(newFluxMatrixTemp(1,1:numFlux))';
-    newFluxMatrixTemp(:,numFlux+1:end) = test_Vpool;
     
     % Infer fluxes using pinv
     Vcalc = calcFluxesViaPinv(newFluxMatrixTemp,modelInfo.S,modelInfo.fixedFluxes);
@@ -148,14 +140,11 @@ function penalty = calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux
 
         % Calculate BST fit penalty
         nT = size(absolute_concMatrix,1)-1;
-        BST_penalty = pen_BSTfit_UDreg(nT,absolute_concMatrix,Vcalc);
-        
-        %Calculate steady state penalty
-        ss_penalty = pen_devSSdist_UDreg(Vcalc(:,1:numFlux));
+        BST_penalty = pen_BSTfit_UDreg(nT,absolute_concMatrix,Vcalc,MA_reactions);
         
         % Calculate total penalty
-        penalty = 1000 * abs(massbalance_penalty) + 10 * abs(conc_penalty) + 10 * abs(oneContMetCorr_penalty) + 10 * abs(oneContMetCurveFit_penalty) + 10 * abs(BST_penalty) + 10 * ss_penalty;
-
+        penalty = abs(massbalance_penalty)/1000 + abs(conc_penalty) + abs(oneContMetCorr_penalty) + abs(oneContMetCurveFit_penalty) + abs(BST_penalty);
+        
         if isnan(penalty)
             penalty = 1e7;
         end

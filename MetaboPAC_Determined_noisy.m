@@ -1,14 +1,16 @@
-function [absolute_concMatrix predicted_responseFactors] = MetaboPAC_Determined_noisy(nt,cov,RF_rep,noise_rep,rand_idx,percKnownKinetics)
+function [absolute_concMatrix predicted_responseFactors] = MetaboPAC_Determined_noisy(nt,cov,rep,percKnownKinetics)
 
 % Set up initial information about system
 modelInfo_Determined
-load(sprintf('Determined_k-01_nT-%03d_cov-%02d_rep-%03d.mat',nt,cov,noise_rep));
+load(sprintf('Determined_k-01_nT-%03d_cov-%02d_rep-%03d.mat',nt,cov,rep));
 
 modelInfo.fixedFluxes = (modelInfo.vBounds(:,1)==modelInfo.vBounds(:,2));
-stoichMatrix = full(modelInfo.S);
 
 numMetabs = size(modelInfo.S,1);
 numFlux = size(modelInfo.S,2);
+
+% Smooth data
+concMatrix = smoothdata(concMatrix,'gaussian',timeVec(end)/4,'SamplePoints',timeVec);
 
 numExtraMets = numMetabs - size(concMatrix,2);
 if numExtraMets > 0
@@ -21,20 +23,12 @@ MA_reactions = [row_MA col_MA];
 
 % Load relative abundances
 load('Determined_trueRF');
-trueRF = trueRF(RF_rep,:);
+trueRF = trueRF(rep,:);
 
 % Calculate relative abundances
 relative_concMatrix = concMatrix.*trueRF;
-relative_fluxMatrix = zeros(size(relative_concMatrix));%give a null fluxMatrix for smoothing functions 
-
-% Smooth data
-relative_data = struct('timeVec',timeVec,'concMatrix',relative_concMatrix,'fluxMatrix',relative_fluxMatrix);
-nTFit = 50;
-fluxScheme = 2;
-[timeVec, relative_concMatrix, ~] = processToFittingData(relative_data,nTFit,fluxScheme);
 
 % Perform kinetic equations approach
-rng(rand_idx)
 numKnownKinetics = round(percKnownKinetics/100*numFlux);
 knownKinetics = sort(randperm(numFlux,numKnownKinetics));
 for i = 1:48
@@ -67,9 +61,8 @@ RF_opt = ones(48,numMetabs);
 if length(knownMet) ~= numMetabs
     for i = 1:48
         % Set initial seed for optimizier
-        rng(i)
         x0 = (maxRandVal-minRandVal).*rand(1,numMetabs-length(knownMet)) + minRandVal;
-        ga_options = optimoptions('ga','MaxGenerations',100,'InitialPopulationMatrix',x0);
+        ga_options = optimoptions('ga','MaxTime',30,'InitialPopulationMatrix',x0);
 
         % Perform genetic algorithm optimization
         [optimalRF fval(i,1)] = ga(@(testRF) calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux,MA_reactions,relative_concMatrix,timeVec,fluxTimeVec,RF_kinetics,knownMet,knownKinetics),numMetabs-length(knownMet),[],[],[],[],lb,ub,[],ga_options);
@@ -89,7 +82,7 @@ end
 predicted_responseFactors = median(RF_opt);
 absolute_concMatrix = relative_concMatrix./predicted_responseFactors;
 
-save(sprintf('results/Determined_MetaboPAC_nT-%03d_cov-%02d_percKnownKinetics-%03d_RFrep-%03d_noiserep-%03d_rand-%03d.mat',nt,cov,percKnownKinetics,RF_rep,noise_rep,rand_idx));
+save(sprintf('Determined_MetaboPAC_nT-%03d_cov-%02d_percKnownKinetics-%03d_rep-%03d.mat',nt,cov,percKnownKinetics,rep));
 end
 
 
@@ -150,7 +143,7 @@ function penalty = calcPenalty(testRF,modelInfo,relative_Vpool,numMetabs,numFlux
         BST_penalty = pen_BSTfit_Determined(nT,absolute_concMatrix,Vcalc,MA_reactions);
         
         % Calculate total penalty
-        penalty = abs(massbalance_penalty)*1000 +  10 * abs(conc_penalty) + 10 * abs(oneContMetCorr_penalty) + 10 * abs(oneContMetCurveFit_penalty) + 10 * abs(BST_penalty);
+        penalty = abs(massbalance_penalty)/1000 + abs(conc_penalty) + abs(oneContMetCorr_penalty) + abs(oneContMetCurveFit_penalty) + abs(BST_penalty);
         
         if isnan(penalty)
             penalty = 1e7;
